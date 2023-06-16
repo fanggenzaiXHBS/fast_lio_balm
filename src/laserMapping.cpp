@@ -514,28 +514,27 @@ void map_incremental()
     kdtree_incremental_time = omp_get_wtime() - st_time;
 }
 
-void map_incremental(PointVector point_cloud)
+void map_incremental(PointVector insert_points)
 {
     PointVector PointToAdd;
     PointVector PointNoNeedDownsample;
-    PointToAdd.reserve(point_cloud.size());
-    PointNoNeedDownsample.reserve(point_cloud.size());
-#if 0
-    for (int i = 0; i < point_cloud.size(); i++)
+    PointToAdd.reserve(insert_points.size());
+    PointNoNeedDownsample.reserve(insert_points.size());
+    for (int i = 0; i < insert_points.size(); i++)
     {
         /* decide if need add to map */
-        if (!Nearest_Points[i].empty() && flg_EKF_inited)
+        if (flg_EKF_inited)
         {
             const PointVector &points_near = Nearest_Points[i];
             bool need_add = true;
             BoxPointType Box_of_Point;
             PointType downsample_result, mid_point;
-            mid_point.x = floor(point_cloud[i].x/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
-            mid_point.y = floor(point_cloud[i].y/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
-            mid_point.z = floor(point_cloud[i].z/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
-            float dist  = calc_dist(point_cloud[i],mid_point);
+            mid_point.x = floor(insert_points[i].x/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            mid_point.y = floor(insert_points[i].y/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            mid_point.z = floor(insert_points[i].z/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            float dist  = calc_dist(insert_points[i],mid_point);
             if (fabs(points_near[0].x - mid_point.x) > 0.5 * filter_size_map_min && fabs(points_near[0].y - mid_point.y) > 0.5 * filter_size_map_min && fabs(points_near[0].z - mid_point.z) > 0.5 * filter_size_map_min){
-                PointNoNeedDownsample.push_back(point_cloud[i]);
+                PointNoNeedDownsample.push_back(insert_points[i]);
                 continue;
             }
             for (int readd_i = 0; readd_i < NUM_MATCH_POINTS; readd_i ++)
@@ -547,20 +546,17 @@ void map_incremental(PointVector point_cloud)
                     break;
                 }
             }
-            if (need_add) PointToAdd.push_back(point_cloud[i]);
+            if (need_add) PointToAdd.push_back(insert_points[i]);
         }
         else
         {
-            PointToAdd.push_back(point_cloud[i]);
+            PointToAdd.push_back(insert_points[i]);
         }
     }
-#endif
 
     double st_time = omp_get_wtime();
-    std::cout << "PointToAdd.size = " << PointToAdd.size() << ", PointNoNeedDownsample = " << PointNoNeedDownsample.size() << std::endl;
-    add_point_size = ikdtree.Add_Points(point_cloud, true);
-    // ikdtree.Add_Points(PointNoNeedDownsample, false);
-    // std::cout << "Finish Add points!" << std::endl;
+    add_point_size = ikdtree.Add_Points(PointToAdd, true);
+    ikdtree.Add_Points(PointNoNeedDownsample, false);
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
 }
@@ -1009,17 +1005,15 @@ int main(int argc, char** argv)
     auto velocity_noise_model = gtsam::noiseModel::Isotropic::Sigma(3, 0.1);  // m/s
     auto bias_noise_model = gtsam::noiseModel::Isotropic::Sigma(6, 1e-3);
 
-    // std::unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
+    std::unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
     std::deque<IMUST> x_buf;
     std::deque<pcl::PointCloud<PointType>::Ptr> pl_fulls;
 
-    static int win_size = 10;
+    static int win_size = 20;
     static int frame_count = 0;
     pcl::PointCloud<PointType> raw_path, ba_path;
-
-    static PointVector PointToAdd;
-    static bool init_ikd_tree = false;
     init_voxmap_param(win_size);
+    static PointVector PointToAdd;
 
     while (status)
     {
@@ -1184,10 +1178,19 @@ int main(int argc, char** argv)
             feats_down_size = feats_down_body->points.size();
 
             {
-                std::unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
-                pl_fulls.push_back(feats_down_body);
-
                 pcl::PointCloud<PointType> pl_cut_plane, pl_ba;
+                pcl::PointCloud<PointType>::Ptr pl_ptr(new pcl::PointCloud<PointType>());
+                for(const auto &pp: feats_down_body->points)
+                {
+                    PointType ap;
+                    ap.x = pp.x;
+                    ap.y = pp.y;
+                    ap.z = pp.z;
+                    ap.intensity = pp.intensity;
+                    pl_ptr->push_back(ap);
+                }
+                pl_fulls.push_back(pl_ptr);
+
                 Eigen::Matrix4d T_Map_Imu = Eigen::Matrix4d::Identity();
                 T_Map_Imu.block(0, 0, 3, 3) = state_point.rot.toRotationMatrix();
                 T_Map_Imu.col(3).head(3) = state_point.pos;
@@ -1201,12 +1204,13 @@ int main(int argc, char** argv)
                 curr.R = T_Map_Lidar.block(0, 0, 3, 3);
                 curr.p = T_Map_Lidar.col(3).head(3);
                 x_buf.push_back(curr);
+                // cut_voxel(surf_map, *pl_ptr, curr, frame_count);
                 // if(frame_count < win_size)
                 frame_count++;
 
+
                 if(frame_count == win_size)
                 {
-                    // pcl::PointCloud<PointType> pl_cut_plane, pl_ba;
                     for(int i = 0; i < win_size; i++)
                     {
                         cut_voxel(surf_map, *pl_fulls[i], x_buf[i], i);
@@ -1231,8 +1235,12 @@ int main(int argc, char** argv)
                     //     raw_path.push_back(ap);
                     // }
 
+                    // std::cout << "Start BALM..." << std::endl;
+
                     BALM2 opt_lsv;
                     opt_lsv.damping_iter(x_buf, voxhess);
+
+                    // std::cout << "Finish BALM..." << std::endl;
 
                     // for(uint i=0; i<x_buf.size(); i++)
                     // {
@@ -1245,11 +1253,29 @@ int main(int argc, char** argv)
                     // }
 
                     // pub_pl_func(raw_path, pub_raw_path);
-                    // pub_pl_func(ba_path, pub_ba_path);
 
-                    // for(auto iter=surf_map.begin(); iter!=surf_map.end();)
+                    for(auto iter=surf_map.begin(); iter!=surf_map.end();)
+                    {
+                        // iter->second->marginalize(1, x_buf, win_size);
+                        // for(auto &fix_p : iter->second->vec_fix)
+                        // {
+                        //     PointType ap;
+                        //     ap.x = fix_p.x();
+                        //     ap.y = fix_p.y();
+                        //     ap.z = fix_p.z();
+                        //     PointToAdd.push_back(ap);
+                        //     ap.curvature = 100;
+                        //     pl_ba.push_back(ap);
+                        // }
+                        delete iter->second;
+                        surf_map.erase(iter++);
+                    }
+                    surf_map.clear();
+
+                    // auto iter = surf_map.begin();
+                    // while(iter != surf_map.end())
                     // {
-                    //     iter->second->marginalize(win_size, x_buf, win_size);
+                    //     iter->second->marginalize(1, x_buf, win_size);
                     //     for(auto &fix_p : iter->second->vec_fix)
                     //     {
                     //         PointType ap;
@@ -1258,12 +1284,9 @@ int main(int argc, char** argv)
                     //         ap.z = fix_p.z();
                     //         ap.curvature = 100;
                     //         pl_ba.push_back(ap);
-                    //         // PointToAdd.push_back(ap);
                     //     }
-                    //     delete iter->second;
-                    //     surf_map.erase(iter++);
+                    //     ++iter;
                     // }
-                    // surf_map.clear();
 
                     // pcl::PointCloud<PointType> pl_ba;
 
@@ -1275,57 +1298,60 @@ int main(int argc, char** argv)
                     //     pl_transform(pl_tem, x_buf[i]);
                     //     pl_ba += pl_tem;
                     // }
-
-                    for(auto &pp : pl_fulls.front()->points)
+                    PointVector ().swap(PointToAdd);
+                    for(const auto &pp : pl_fulls.back()->points)
                     {
                         PointType ap;
                         Eigen::Vector3d pvec(pp.x, pp.y, pp.z);
-                        pvec = x_buf.front().R * pvec + x_buf.front().p;
-                        ap.x = pvec.x();
-                        ap.y = pvec.y();
-                        ap.z = pvec.z();
+                        pvec = x_buf.back().R * pvec + x_buf.back().p;
+                        ap.x = pvec[0];
+                        ap.y = pvec[1];
+                        ap.z = pvec[2];
                         PointToAdd.push_back(ap);
+                        pl_ba.push_back(ap);
                     }
 
-                    init_ikd_tree = true;
-
                     pub_pl_func(pl_ba, pub_ba);
+
+                    {
+                        PointType ap;
+                        ap.x = x_buf.back().p.x();
+                        ap.y = x_buf.back().p.y();
+                        ap.z = x_buf.back().p.z();
+                        ba_path.push_back(ap);
+
+                        pub_pl_func(ba_path, pub_ba_path);
+                    }
 
                     // reset status
                     frame_count--;
                     x_buf.pop_front();
                     pl_fulls.pop_front();
-                    // std::vector<pcl::PointCloud<PointType>::Ptr>().swap(pl_fulls);
+                    // std::deque<pcl::PointCloud<PointType>::Ptr>().swap(pl_fulls);
                 }
-                // else if(x_buf.size() > win_size)
-                // {
-                //     pub_pl_func(raw_path, pub_raw_path);
-                //     pub_pl_func(ba_path, pub_ba_path);
-                // }
+
             }
-
-            // std::cout << "PointToAdd.size = " << PointToAdd.size() << std::endl;
-
 
             /*** initialize the map kdtree ***/
             if(ikdtree.Root_Node == nullptr)
             {
-                // if(feats_down_size > 5)
-                // {
-                //     feats_down_world->resize(feats_down_size);
-                //     for(int i = 0; i < feats_down_size; i++)
-                //     {
-                //         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
-                //     }
-                //     ikdtree.Build(feats_down_world->points);
-                // }
-
-                if(PointToAdd.size() > 5)
+                if(feats_down_size > 5)
                 {
                     ikdtree.set_downsample_param(filter_size_map_min);
-                    ikdtree.Build(PointToAdd);
-                    std::cout << "PointToAdd.size = " << PointToAdd.size() << " Init ikd_tree." << std::endl;
+                    feats_down_world->resize(feats_down_size);
+                    for(int i = 0; i < feats_down_size; i++)
+                    {
+                        pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
+                    }
+                    ikdtree.Build(feats_down_world->points);
                 }
+
+                // if(PointToAdd.size() > 5)
+                // {
+                //     ikdtree.set_downsample_param(filter_size_map_min);
+                //     ikdtree.Build(PointToAdd);
+                //     std::cout << "Init ikd-tree!" << std::endl;
+                // }
                 continue;
             }
             int featsFromMapNum = ikdtree.validnum();
@@ -1337,16 +1363,14 @@ int main(int argc, char** argv)
                 continue;
             }
 
-            std::cout << "PointToAdd.size = " << PointToAdd.size() << std::endl;
+            // ikdtree.Add_Points(PointToAdd, true);
 
             normvec->resize(feats_down_size);
             feats_down_world->resize(feats_down_size);
 
             V3D ext_euler = SO3ToEuler(state_point.offset_R_Imu_Lidar);
-            fout_pre << setw(20) << Measures.lidar_beg_time - first_lidar_time << " "
-                     << euler_cur.transpose() << " " << state_point.pos.transpose() << " " << ext_euler.transpose() << " "
-                     << state_point.offset_t_Imu_Lidar.transpose() << " " << state_point.vel.transpose() << " "
-                     << state_point.bg.transpose() << " " << state_point.ba.transpose() << " " << state_point.grav << endl;
+            fout_pre<<setw(20)<<Measures.lidar_beg_time - first_lidar_time<<" "<<euler_cur.transpose()<<" "<< state_point.pos.transpose()<<" "<<ext_euler.transpose() << " "<<state_point.offset_t_Imu_Lidar.transpose()<< " " << state_point.vel.transpose() \
+            <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<< endl;
 
             if(0) // If you need to see map point, change to "if(1)"
             {
@@ -1382,9 +1406,7 @@ int main(int argc, char** argv)
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
-            // map_incremental();
-            ikdtree.Add_Points(PointToAdd, true);
-            PointVector ().swap(PointToAdd);
+            map_incremental(PointToAdd);
             t5 = omp_get_wtime();
 
             /******* Publish points *******/
