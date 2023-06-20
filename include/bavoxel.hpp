@@ -9,7 +9,7 @@ int layer_limit = 2;
 int layer_size[] = {30, 30, 30, 30};
 // float eigen_value_array[] = {1.0/4.0, 1.0/4.0, 1.0/4.0};
 float eigen_value_array[4] = {1.0/16, 1.0/16, 1.0/16, 1.0/16};
-int min_ps = 15;
+int min_ps = 10;
 double one_three = (1.0 / 3.0);
 
 double voxel_size = 1;
@@ -764,7 +764,7 @@ public:
 
       if(judge_eigen(win_count))
       {
-        if(octo_state==0 && point_size>layer_size[layer])
+        if(octo_state==0 && point_size>layer_size[layer]) // octo_state = 0 or octo_state = 2
           octo_state = 2;
 
         point_size -= fix_point.N;
@@ -942,7 +942,6 @@ public:
         if(leaves[i] != nullptr)
           leaves[i]->tras_opt(vox_opt, win_count);
     }
-
   }
 
 };
@@ -1095,7 +1094,7 @@ public:
     if(planes[0] < 20)
     {
       printf("Initial error too large.\n");
-      printf("Please loose plane determination criteria for more planes.\n");
+      printf("Please loose plane determination criteria for more planes(%d).\n", planes[0]);
       printf("The optimization is terminated.\n");
       exit(0);
     }

@@ -62,6 +62,13 @@
 #include <ikd-Tree/ikd_Tree.h>
 #include "bavoxel.hpp"
 
+#define INIT_TIME           (0.1)
+#define LASER_POINT_COV     (0.001)
+#define MAXN                (720000)
+#define PUBFRAME_PERIOD     (20)
+// #define EN_GTSAM
+
+#ifdef EN_GTSAM
 // GTSAM
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam/nonlinear/ISAM2Params.h>
@@ -72,14 +79,10 @@
 #include <gtsam/navigation/PreintegrationCombinedParams.h>
 #include <gtsam_unstable/slam/SmartStereoProjectionPoseFactor.h>
 
-#define INIT_TIME           (0.1)
-#define LASER_POINT_COV     (0.001)
-#define MAXN                (720000)
-#define PUBFRAME_PERIOD     (20)
-
 using gtsam::symbol_shorthand::X;
 using gtsam::symbol_shorthand::V;
 using gtsam::symbol_shorthand::B;
+#endif
 
 /*** Time Log Variables ***/
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
@@ -514,53 +517,6 @@ void map_incremental()
     kdtree_incremental_time = omp_get_wtime() - st_time;
 }
 
-void map_incremental(PointVector insert_points)
-{
-    PointVector PointToAdd;
-    PointVector PointNoNeedDownsample;
-    PointToAdd.reserve(insert_points.size());
-    PointNoNeedDownsample.reserve(insert_points.size());
-    for (int i = 0; i < insert_points.size(); i++)
-    {
-        /* decide if need add to map */
-        if (flg_EKF_inited)
-        {
-            const PointVector &points_near = Nearest_Points[i];
-            bool need_add = true;
-            BoxPointType Box_of_Point;
-            PointType downsample_result, mid_point;
-            mid_point.x = floor(insert_points[i].x/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
-            mid_point.y = floor(insert_points[i].y/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
-            mid_point.z = floor(insert_points[i].z/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
-            float dist  = calc_dist(insert_points[i],mid_point);
-            if (fabs(points_near[0].x - mid_point.x) > 0.5 * filter_size_map_min && fabs(points_near[0].y - mid_point.y) > 0.5 * filter_size_map_min && fabs(points_near[0].z - mid_point.z) > 0.5 * filter_size_map_min){
-                PointNoNeedDownsample.push_back(insert_points[i]);
-                continue;
-            }
-            for (int readd_i = 0; readd_i < NUM_MATCH_POINTS; readd_i ++)
-            {
-                if (points_near.size() < NUM_MATCH_POINTS) break;
-                if (calc_dist(points_near[readd_i], mid_point) < dist)
-                {
-                    need_add = false;
-                    break;
-                }
-            }
-            if (need_add) PointToAdd.push_back(insert_points[i]);
-        }
-        else
-        {
-            PointToAdd.push_back(insert_points[i]);
-        }
-    }
-
-    double st_time = omp_get_wtime();
-    add_point_size = ikdtree.Add_Points(PointToAdd, true);
-    ikdtree.Add_Points(PointNoNeedDownsample, false);
-    add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
-    kdtree_incremental_time = omp_get_wtime() - st_time;
-}
-
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI(500000, 1));
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
 void publish_frame_world(const ros::Publisher & pubLaserCloudFull)
@@ -964,6 +920,7 @@ int main(int argc, char** argv)
     ros::Publisher pub_ba = nh.advertise<sensor_msgs::PointCloud2>("/map_ba", 100);
     ros::Publisher pub_raw_path = nh.advertise<sensor_msgs::PointCloud2>("/raw_path", 100);
     ros::Publisher pub_ba_path = nh.advertise<sensor_msgs::PointCloud2>("/ba_path", 100);
+#ifdef EN_GTSAM
 //------------------------------------------------------------------------------------------------------
 // For GTSAM config
 // Set ISAM2 parameters and create ISAM2 solver object
@@ -988,12 +945,6 @@ int main(int argc, char** argv)
     imu_params->omegaCoriolis = Eigen::Vector3d::Zero();
     std::shared_ptr<gtsam::PreintegratedImuMeasurements> preintegrated = nullptr;
     static bool init_imu_param = false;
-
-//------------------------------------------------------------------------------------------------------
-    signal(SIGINT, SigHandle);
-    ros::Rate rate(5000);
-    bool status = ros::ok();
-    static double last_imu_timestamp = 0;
     static int64_t correction_count = 0;
     static gtsam::NavState prev_state, prop_state;
     static gtsam::Values initial_values;
@@ -1004,6 +955,13 @@ int main(int argc, char** argv)
     auto pose_noise_model = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 0.01, 0.01, 0.01, 0.5, 0.5, 0.5).finished());  // rad, rad, rad, m, m, m
     auto velocity_noise_model = gtsam::noiseModel::Isotropic::Sigma(3, 0.1);  // m/s
     auto bias_noise_model = gtsam::noiseModel::Isotropic::Sigma(6, 1e-3);
+
+//------------------------------------------------------------------------------------------------------
+#endif
+    signal(SIGINT, SigHandle);
+    ros::Rate rate(5000);
+    bool status = ros::ok();
+    static double last_imu_timestamp = 0;
 
     std::unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
     std::deque<IMUST> x_buf;
@@ -1038,7 +996,7 @@ int main(int argc, char** argv)
             svd_time   = 0;
             t0 = omp_get_wtime();
 
-#if 0
+#ifdef EN_GTSAM
             if(!init_imu_param && !Measures.imu.empty())
             {
                 Eigen::Vector3d mean = Eigen::Vector3d::Zero();
@@ -1189,7 +1147,7 @@ int main(int argc, char** argv)
                     ap.intensity = pp.intensity;
                     pl_ptr->push_back(ap);
                 }
-                pl_fulls.push_back(pl_ptr);
+                // pl_fulls.push_back(pl_ptr);
 
                 Eigen::Matrix4d T_Map_Imu = Eigen::Matrix4d::Identity();
                 T_Map_Imu.block(0, 0, 3, 3) = state_point.rot.toRotationMatrix();
@@ -1204,18 +1162,18 @@ int main(int argc, char** argv)
                 curr.R = T_Map_Lidar.block(0, 0, 3, 3);
                 curr.p = T_Map_Lidar.col(3).head(3);
                 x_buf.push_back(curr);
-                // cut_voxel(surf_map, *pl_ptr, curr, frame_count);
+                cut_voxel(surf_map, *pl_ptr, curr, frame_count);
+
                 // if(frame_count < win_size)
                 frame_count++;
 
 
                 if(frame_count == win_size)
                 {
-                    for(int i = 0; i < win_size; i++)
-                    {
-                        cut_voxel(surf_map, *pl_fulls[i], x_buf[i], i);
-                    }
-
+                    // for(int i = 0; i < win_size; i++)
+                    // {
+                    //     cut_voxel(surf_map, *pl_fulls[i], x_buf[i], i);
+                    // }
                     VOX_HESS voxhess;
                     for(auto iter=surf_map.begin(); iter!=surf_map.end(); iter++)
                     {
@@ -1223,83 +1181,40 @@ int main(int argc, char** argv)
                         iter->second->tras_opt(voxhess, win_size);
                         // iter->second->tras_display(pl_cut_plane, win_size);
                     }
+
+                    std::cout << "surf_map.size = " << surf_map.size() << std::endl;
                     // pub_pl_func(pl_cut_plane, pub_cute);
-
-                    // for(uint i=0; i<x_buf.size(); i++)
-                    // {
-                    //     PointType ap;
-                    //     ap.x = x_buf[i].p.x();
-                    //     ap.y = x_buf[i].p.y();
-                    //     ap.z = x_buf[i].p.z();
-                    //     ap.curvature = i;
-                    //     raw_path.push_back(ap);
-                    // }
-
-                    // std::cout << "Start BALM..." << std::endl;
 
                     BALM2 opt_lsv;
                     opt_lsv.damping_iter(x_buf, voxhess);
 
-                    // std::cout << "Finish BALM..." << std::endl;
-
-                    // for(uint i=0; i<x_buf.size(); i++)
-                    // {
-                    //     PointType ap;
-                    //     ap.x = x_buf[i].p.x();
-                    //     ap.y = x_buf[i].p.y();
-                    //     ap.z = x_buf[i].p.z();
-                    //     ap.curvature = i;
-                    //     ba_path.push_back(ap);
-                    // }
-
-                    // pub_pl_func(raw_path, pub_raw_path);
-
-                    for(auto iter=surf_map.begin(); iter!=surf_map.end();)
+                    PointVector ().swap(PointToAdd);
+                    auto iter = surf_map.begin();
+                    while(iter != surf_map.end())
                     {
-                        // iter->second->marginalize(1, x_buf, win_size);
-                        // for(auto &fix_p : iter->second->vec_fix)
+                        iter->second->marginalize(1, x_buf, win_size);
+                        // for(auto &fix_p : iter->second->vec_magl)
                         // {
                         //     PointType ap;
                         //     ap.x = fix_p.x();
                         //     ap.y = fix_p.y();
                         //     ap.z = fix_p.z();
+                        //     // ap.curvature = 100;
                         //     PointToAdd.push_back(ap);
-                        //     ap.curvature = 100;
                         //     pl_ba.push_back(ap);
                         // }
-                        delete iter->second;
-                        surf_map.erase(iter++);
+                        // iter->second->vec_magl.clear();
+                        if(!iter->second->is2opt)
+                        {
+                            delete iter->second;
+                            iter = surf_map.erase(iter);
+                            continue;
+                        }
+                        ++iter;
                     }
-                    surf_map.clear();
 
-                    // auto iter = surf_map.begin();
-                    // while(iter != surf_map.end())
-                    // {
-                    //     iter->second->marginalize(1, x_buf, win_size);
-                    //     for(auto &fix_p : iter->second->vec_fix)
-                    //     {
-                    //         PointType ap;
-                    //         ap.x = fix_p.x();
-                    //         ap.y = fix_p.y();
-                    //         ap.z = fix_p.z();
-                    //         ap.curvature = 100;
-                    //         pl_ba.push_back(ap);
-                    //     }
-                    //     ++iter;
-                    // }
-
-                    // pcl::PointCloud<PointType> pl_ba;
-
-                    // int winsize = x_buf.size();
-                    // for(int i=0; i<winsize; i++)
-                    // {
-                    //     pcl::PointCloud<PointType> pl_tem = *pl_fulls[i];
-                    //     // down_sampling_voxel(pl_tem, 0.05);
-                    //     pl_transform(pl_tem, x_buf[i]);
-                    //     pl_ba += pl_tem;
-                    // }
-                    PointVector ().swap(PointToAdd);
-                    for(const auto &pp : pl_fulls.back()->points)
+                    // PointVector ().swap(PointToAdd);
+                    for(const auto &pp : pl_ptr->points)
                     {
                         PointType ap;
                         Eigen::Vector3d pvec(pp.x, pp.y, pp.z);
@@ -1326,8 +1241,7 @@ int main(int argc, char** argv)
                     // reset status
                     frame_count--;
                     x_buf.pop_front();
-                    pl_fulls.pop_front();
-                    // std::deque<pcl::PointCloud<PointType>::Ptr>().swap(pl_fulls);
+                    // pl_fulls.pop_front();
                 }
 
             }
@@ -1344,6 +1258,7 @@ int main(int argc, char** argv)
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
                     ikdtree.Build(feats_down_world->points);
+                    std::cout << "Init ikd-tree!" << std::endl;
                 }
 
                 // if(PointToAdd.size() > 5)
@@ -1406,7 +1321,7 @@ int main(int argc, char** argv)
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
-            map_incremental(PointToAdd);
+            ikdtree.Add_Points(PointToAdd, true);
             t5 = omp_get_wtime();
 
             /******* Publish points *******/
